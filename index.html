@@ -1304,17 +1304,19 @@ function generateWorldMap() {
 function renderMap() {
   if (!worldData) return;
   const opts = getRenderOptions();
+  const mapCanvas = document.getElementById('mapCanvas');
 
-  // Determine active shading tier based on which checkbox is checked
   let activeTier = 'none';
   if (opts.showSmall) activeTier = 'small';
   else if (opts.showMed) activeTier = 'med';
   else if (opts.showGrand) activeTier = 'grand';
 
-  // 1. Render GPU Terrain with exact active zone shading
-  if (typeof TerrainGL !== 'undefined') {
+  // 1. Render Terrain via GPU WebGL (or fallback to 2D canvas on older devices)
+  if (typeof TerrainGL !== 'undefined' && TerrainGL.isInitialized) {
     TerrainGL.updateZoneTexture(worldData, activeTier);
     TerrainGL.render(opts);
+  } else if (mapCanvas) {
+    WorldGen.renderTerrainToCanvas(mapCanvas, worldData, opts);
   }
 
   // 2. Render 2D Vector Features (Rivers, Roads, Mountains, Towns, Borders)
@@ -1330,7 +1332,6 @@ function renderMap() {
   renderActors();
   populateSidebarList();
 }
-
 // --- Character / Simulation Hooks ---
 function fetchSavedCharactersFromDB(callback) {
   const request = indexedDB.open("characterDatabase", 3);
