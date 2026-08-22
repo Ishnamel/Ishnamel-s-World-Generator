@@ -1,9 +1,9 @@
 /**
  * ============================================================================
- * TERRAIN_GL.JS - Hardware-Accelerated 5K GPU Terrain Shader Engine
+ * TERRAIN_GL.JS - Universal Mobile & Desktop WebGL2 Terrain Engine
  * ============================================================================
- * Uses WebGL2 to render 5K terrain, bilinear smoothing, 3D hillshading,
- * and political zone tints in under 1 millisecond per frame.
+ * Features in-shader bilinear filtering (100% mobile compatible), dynamic 
+ * resolution scaling for mobile canvas limits, and real-time 3D hillshading.
  */
 
 (function (root, factory) {
@@ -32,6 +32,7 @@
     uniform sampler2D u_elevationTex;
     uniform sampler2D u_zoneTex;
     uniform vec2 u_texelSize;
+    uniform vec2 u_gridSize;
     uniform vec3 u_lightDir;
     uniform int u_style; // 0: biomes, 1: parchment, 2: dark
     uniform bool u_showHillshade;
@@ -39,6 +40,20 @@
 
     in vec2 v_uv;
     out vec4 fragColor;
+
+    // Mobile-safe hardware-independent bilinear sampling
+    float sampleElevationBilinear(vec2 uv) {
+      vec2 pos = uv * u_gridSize - 0.5;
+      vec2 f = fract(pos);
+      vec2 uv0 = (floor(pos) + 0.5) * u_texelSize;
+
+      float e00 = texture(u_elevationTex, uv0).r;
+      float e10 = texture(u_elevationTex, uv0 + vec2(u_texelSize.x, 0.0)).r;
+      float e01 = texture(u_elevationTex, uv0 + vec2(0.0, u_texelSize.y)).r;
+      float e11 = texture(u_elevationTex, uv0 + u_texelSize).r;
+
+      return mix(mix(e00, e10, f.x), mix(e01, e11, f.x), f.y);
+    }
 
     vec3 getBiomeColor(float e, int style) {
       if (style == 0) { // Realistic Biomes
@@ -75,16 +90,16 @@
     }
 
     void main() {
-      // 1. Hardware Bilinear Height Sampling
-      float e = texture(u_elevationTex, v_uv).r;
+      // 1. Sample elevation with universal bilinear filtering
+      float e = sampleElevationBilinear(v_uv);
 
       // 2. Real-time 3D GPU Hillshade
       float shade = 1.0;
       if (u_showHillshade) {
-        float left  = texture(u_elevationTex, v_uv - vec2(u_texelSize.x, 0.0)).r;
-        float right = texture(u_elevationTex, v_uv + vec2(u_texelSize.x, 0.0)).r;
-        float down  = texture(u_elevationTex, v_uv - vec2(0.0, u_texelSize.y)).r;
-        float up    = texture(u_elevationTex, v_uv + vec2(0.0, u_texelSize.y)).r;
+        float left  = sampleElevationBilinear(v_uv - vec2(u_texelSize.x, 0.0));
+        float right = sampleElevationBilinear(v_uv + vec2(u_texelSize.x, 0.0));
+        float down  = sampleElevationBilinear(v_uv - vec2(0.0, u_texelSize.y));
+        float up    = sampleElevationBilinear(v_uv + vec2(0.0, u_texelSize.y));
 
         float dzdx = (right - left) * 2.0;
         float dzdy = (up - down) * 2.0;
@@ -95,7 +110,7 @@
       // 3. Base Biome Color
       vec3 col = getBiomeColor(e, u_style) * shade;
 
-      // 4. Political Zone Tint Overlay (Only applied on Land: e >= 0.40)
+      // 4. Political Zone Tint Overlay
       if (u_showZoneOverlay && e >= 0.40) {
         vec4 zoneColor = texture(u_zoneTex, v_uv);
         if (zoneColor.a > 0.0) {
@@ -117,28 +132,42 @@
       this.gw = 2560;
       this.gh = 1440;
       this.isInitialized = false;
-
+      this.currentZoneTier = 'none';
       this.uniforms = {};
     }
 
     init(canvas) {
       if (!canvas) return false;
+
+      // Mobile Hardware Check: Clamp canvas size if exceeding device limits
+      const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 1024;
+      const testGl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+      const maxDim = testGl ? testGl.getParameter(testGl.MAX_TEXTURE_SIZE) : 4096;
+
+      if (isMobile || maxDim < 5120) {
+        canvas.width = Math.min(2560, maxDim);
+        canvas.height = Math.min(1440, Math.round(maxDim * 9 / 16));
+        
+        const featCanvas = document.getElementById('featureCanvas');
+        const actorCanvas = document.getElementById('actorCanvas');
+        if (featCanvas) { featCanvas.width = canvas.width; featCanvas.height = canvas.height; }
+        if (actorCanvas) { actorCanvas.width = canvas.width; actorCanvas.height = canvas.height; }
+      }
+
       const gl = canvas.getContext('webgl2', {
         preserveDrawingBuffer: true,
         antialias: false,
-        depth: false
+        depth: false,
+        powerPreference: "high-performance"
       });
 
       if (!gl) {
-        console.error("WebGL2 is not supported on this browser!");
+        console.warn("WebGL2 not available on this device, will fallback to 2D canvas.");
         return false;
       }
 
       this.gl = gl;
-      gl.getExtension('OES_texture_float_linear');
-      gl.getExtension('EXT_color_buffer_float');
 
-      // Compile Shader Program
       const vs = this.compileShader(gl.VERTEX_SHADER, VS_SOURCE);
       const fs = this.compileShader(gl.FRAGMENT_SHADER, FS_SOURCE);
       const program = gl.createProgram();
@@ -152,19 +181,18 @@
       }
       this.program = program;
 
-      // Cache Uniform Locations
       gl.useProgram(program);
       this.uniforms = {
         elevationTex: gl.getUniformLocation(program, 'u_elevationTex'),
         zoneTex: gl.getUniformLocation(program, 'u_zoneTex'),
         texelSize: gl.getUniformLocation(program, 'u_texelSize'),
+        gridSize: gl.getUniformLocation(program, 'u_gridSize'),
         lightDir: gl.getUniformLocation(program, 'u_lightDir'),
         style: gl.getUniformLocation(program, 'u_style'),
         showHillshade: gl.getUniformLocation(program, 'u_showHillshade'),
         showZoneOverlay: gl.getUniformLocation(program, 'u_showZoneOverlay')
       };
 
-      // Set Fullscreen Quad Geometry
       const quadVertices = new Float32Array([
         -1, -1,
          1, -1,
@@ -184,16 +212,15 @@
       gl.enableVertexAttribArray(aPos);
       gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-      // Create Elevation Texture
+      // NEAREST filtering on R32F is 100% compliant on all mobile GPUs
       this.elevationTex = gl.createTexture();
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.elevationTex);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-      // Create Zone Overlay Texture
       this.zoneTex = gl.createTexture();
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.zoneTex);
@@ -205,7 +232,6 @@
       gl.uniform1i(this.uniforms.elevationTex, 0);
       gl.uniform1i(this.uniforms.zoneTex, 1);
 
-      // Default light from top-left
       const lx = -0.707, ly = -0.707, lz = 0.5;
       const len = Math.hypot(lx, ly, lz);
       gl.uniform3f(this.uniforms.lightDir, lx / len, ly / len, lz / len);
@@ -227,8 +253,7 @@
       return shader;
     }
 
-    // Full Upload when Map is generated
-    uploadWorldData(worldData, activeZoneTier = 'grand') {
+    uploadWorldData(worldData, activeZoneTier = 'none') {
       if (!this.isInitialized || !worldData) return;
       const gl = this.gl;
       this.gw = worldData.gw;
@@ -236,8 +261,8 @@
 
       gl.useProgram(this.program);
       gl.uniform2f(this.uniforms.texelSize, 1.0 / this.gw, 1.0 / this.gh);
+      gl.uniform2f(this.uniforms.gridSize, this.gw, this.gh);
 
-      // 1. Upload Heightmap Float Texture
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.elevationTex);
       gl.texImage2D(
@@ -247,11 +272,10 @@
         worldData.elevation
       );
 
-      // 2. Upload Political Zone Overlay Colors
-      this.updateZoneTexture(worldData, activeZoneTier);
+      this.updateZoneTexture(worldData, activeZoneTier, true);
     }
 
-updateZoneTexture(worldData, activeZoneTier = 'none', force = false) {
+    updateZoneTexture(worldData, activeZoneTier = 'none', force = false) {
       if (!this.isInitialized || !worldData) return;
       
       if (!force && this.currentZoneTier === activeZoneTier) return;
@@ -264,7 +288,6 @@ updateZoneTexture(worldData, activeZoneTier = 'none', force = false) {
       if (activeZoneTier !== 'none') {
         const { grandState, medState, smallState, grandZones, medZones, smallZones } = worldData;
 
-        // Build safe ID-to-color lookup map
         const colorMap = new Map();
         if (activeZoneTier === 'grand' && grandZones) {
           grandZones.forEach(z => { if (z && z.color) colorMap.set(z.id, z.color); });
@@ -302,8 +325,7 @@ updateZoneTexture(worldData, activeZoneTier = 'none', force = false) {
         zoneBuffer
       );
     }
-    // Instant Sub-Region Upload during Brush Stroke (Takes 0.05ms!)
-    // In terrain_gl.js:
+
     updateElevationSubRegion(worldData, minX, minY, maxX, maxY) {
       if (!this.isInitialized || !worldData) return;
       const gl = this.gl;
@@ -335,15 +357,13 @@ updateZoneTexture(worldData, activeZoneTier = 'none', force = false) {
       );
     }
 
-    // Draw the 5K frame instantaneously on GPU
-     render(options = {}) {
+    render(options = {}) {
       if (!this.isInitialized) return;
       const gl = this.gl;
 
       gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
       gl.useProgram(this.program);
 
-      // Set Style (0: biomes, 1: parchment, 2: dark)
       let styleIdx = 0;
       if (options.style === 'parchment') styleIdx = 1;
       else if (options.style === 'dark') styleIdx = 2;
